@@ -15,8 +15,7 @@ WORKER_COUNT=max(1,CPU_COUNT)
 QUEUE_LIMIT=max(1,int(os.getenv("QUEUE_LIMIT","100")))
 MAX_UPLOAD_BYTES=max(1,int(os.getenv("MAX_UPLOAD_BYTES","150000000")))
 SAMPLE_FPS=max(0.1,float(os.getenv("SAMPLE_FPS","3")))
-MAX_EXTRACTED_FRAMES=max(1,int(os.getenv("MAX_EXTRACTED_FRAMES","90")))
-RETENTION_HOURS=max(1,int(os.getenv("RETENTION_HOURS","24")))
+RETENTION_MINUTES=max(1,int(os.getenv("RETENTION_MINUTES","30")))
 FFMPEG_TIMEOUT=max(30,int(os.getenv("FFMPEG_TIMEOUT_SECONDS","600")))
 ctx=mp.get_context("spawn")
 task_queue=ctx.Queue(maxsize=QUEUE_LIMIT)
@@ -62,7 +61,7 @@ def worker_loop(index,q,shared_state):
                 c.execute("UPDATE tasks SET status='processing',started_at=?,worker=? WHERE id=?",(started,index,task_id))
             vf=f"fps={interval},scale='min(1080,iw)':-2"
             cmd=["ffmpeg","-hide_banner","-loglevel","error","-threads","1","-i",source,"-vf",vf,
-                 "-q:v","2","-frames:v",str(max_frames),"-y",str(out/"frame_%04d.jpg")]
+                 "-q:v","2","-y",str(out/"frame_%04d.jpg")]
             p=subprocess.run(cmd,capture_output=True,text=True,timeout=FFMPEG_TIMEOUT)
             if p.returncode: raise RuntimeError((p.stderr or "ffmpeg failed")[-1500:])
             frames=sorted(out.glob("frame_*.jpg"))
@@ -91,7 +90,7 @@ def enqueue_pending():
 
 def maintenance():
     while not stop_event.wait(60):
-        cutoff=time.time()-RETENTION_HOURS*3600
+        cutoff=time.time()-RETENTION_MINUTES*60
         try:
             with db() as c:
                 old=c.execute("SELECT id,source,output_dir FROM tasks WHERE status IN ('completed','failed') AND completed_at<?",(cutoff,)).fetchall()
@@ -161,13 +160,7 @@ async def submit_video(file:UploadFile=File(...),x_api_key:Optional[str]=Header(
     except Exception:
         src.unlink(missing_ok=True); raise
     interval=SAMPLE_FPS
-    max_frames=MAX_EXTRACTED_FRAMES
-    # Reduce effective fps for long videos so the output is bounded.
-    try:
-        probe=subprocess.run(["ffprobe","-v","error","-show_entries","format=duration","-of","default=noprint_wrappers=1:nokey=1",str(src)],capture_output=True,text=True,timeout=30)
-        duration=float(probe.stdout.strip())
-        if duration>0: interval=min(interval,max_frames/duration)
-    except Exception: pass
+    max_frames=0  # 0 means unlimited; sample at the configured FPS for the full duration.
     with db() as c:
         c.execute("INSERT INTO tasks(id,status,created_at,source,output_dir,interval,max_frames) VALUES(?,?,?,?,?,?,?)",
                   (task_id,"queued",time.time(),str(src),str(out),interval,max_frames))
