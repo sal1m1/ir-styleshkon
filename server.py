@@ -51,7 +51,7 @@ def worker_loop(index,q,shared_state):
         try:
             with db() as c:
                 row=c.execute("SELECT * FROM tasks WHERE id=?",(task_id,)).fetchone()
-            if not row: continue
+            if not row or row["status"]!="queued": continue
             source=row["source"]; out=Path(row["output_dir"])
             interval=row["interval"]; max_frames=row["max_frames"]
             out.mkdir(parents=True,exist_ok=True)
