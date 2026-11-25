@@ -10,12 +10,12 @@ API_KEY=os.getenv("IR_SERVICE_API_KEY","")
 ROOT=Path(os.getenv("DATA_DIR","/var/lib/ir-styleshkon"))
 UPLOADS=ROOT/"uploads"; OUTPUTS=ROOT/"outputs"
 UPLOADS.mkdir(parents=True,exist_ok=True); OUTPUTS.mkdir(parents=True,exist_ok=True)
-CPU_COUNT=os.cpu_count() or 1
+CPU_COUNT=len(os.sched_getaffinity(0)) if hasattr(os,"sched_getaffinity") else (os.cpu_count() or 1)
 WORKER_COUNT=max(1,CPU_COUNT)
 ctx=mp.get_context("spawn")
 task_queue=ctx.Queue(maxsize=int(os.getenv("QUEUE_LIMIT","100")))
-manager=ctx.Manager()
-tasks=manager.dict()
+manager=None
+tasks=None
 workers=[]
 
 def worker_loop(worker_index, q, shared):
@@ -54,7 +54,9 @@ app=FastAPI(title="IR Styleshkon Video Frame Service",version="1.0.0")
 
 @app.on_event("startup")
 def startup():
-    global workers
+    global workers, manager, tasks
+    manager=ctx.Manager()
+    tasks=manager.dict()
     for i in range(WORKER_COUNT):
         p=ctx.Process(target=worker_loop,args=(i,task_queue,tasks),daemon=True)
         p.start(); workers.append(p)
@@ -65,6 +67,7 @@ def shutdown():
         try: task_queue.put_nowait(None)
         except Exception: pass
     for p in workers: p.join(timeout=2)
+    if manager is not None: manager.shutdown()
 
 def auth(key):
     if not API_KEY or key!=API_KEY: raise HTTPException(401,"Unauthorized")
