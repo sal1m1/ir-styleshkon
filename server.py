@@ -13,7 +13,9 @@ UPLOADS.mkdir(parents=True,exist_ok=True); OUTPUTS.mkdir(parents=True,exist_ok=T
 CPU_COUNT=len(os.sched_getaffinity(0)) if hasattr(os,"sched_getaffinity") else (os.cpu_count() or 1)
 WORKER_COUNT=max(1,CPU_COUNT)
 QUEUE_LIMIT=max(1,int(os.getenv("QUEUE_LIMIT","100")))
-MAX_UPLOAD_BYTES=max(1,int(os.getenv("MAX_UPLOAD_BYTES","200000000")))
+MAX_UPLOAD_BYTES=max(1,int(os.getenv("MAX_UPLOAD_BYTES","150000000")))
+SAMPLE_FPS=max(0.1,float(os.getenv("SAMPLE_FPS","3")))
+MAX_EXTRACTED_FRAMES=max(1,int(os.getenv("MAX_EXTRACTED_FRAMES","90")))
 RETENTION_HOURS=max(1,int(os.getenv("RETENTION_HOURS","24")))
 FFMPEG_TIMEOUT=max(30,int(os.getenv("FFMPEG_TIMEOUT_SECONDS","600")))
 ctx=mp.get_context("spawn")
@@ -33,7 +35,7 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS tasks (
           id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at REAL NOT NULL,
           started_at REAL, completed_at REAL, source TEXT NOT NULL, output_dir TEXT NOT NULL,
-          interval INTEGER NOT NULL, max_frames INTEGER NOT NULL, frames TEXT NOT NULL DEFAULT '[]',
+          interval REAL NOT NULL, max_frames INTEGER NOT NULL, frames TEXT NOT NULL DEFAULT '[]',
           error TEXT, worker INTEGER)""")
         # Processing jobs interrupted by a restart are safely requeued.
         c.execute("UPDATE tasks SET status='queued',started_at=NULL,error=NULL WHERE status='processing'")
@@ -58,7 +60,7 @@ def worker_loop(index,q,shared_state):
             started=time.time()
             with db() as c:
                 c.execute("UPDATE tasks SET status='processing',started_at=?,worker=? WHERE id=?",(started,index,task_id))
-            vf=f"fps=1/{interval},scale='min(1080,iw)':-2"
+            vf=f"fps={interval},scale='min(1080,iw)':-2"
             cmd=["ffmpeg","-hide_banner","-loglevel","error","-threads","1","-i",source,"-vf",vf,
                  "-q:v","2","-frames:v",str(max_frames),"-y",str(out/"frame_%04d.jpg")]
             p=subprocess.run(cmd,capture_output=True,text=True,timeout=FFMPEG_TIMEOUT)
@@ -158,8 +160,14 @@ async def submit_video(file:UploadFile=File(...),x_api_key:Optional[str]=Header(
                 f.write(chunk)
     except Exception:
         src.unlink(missing_ok=True); raise
-    interval=max(1,int(os.getenv("FRAME_INTERVAL_SECONDS","1")))
-    max_frames=max(1,min(100,int(os.getenv("MAX_FRAMES","12"))))
+    interval=SAMPLE_FPS
+    max_frames=MAX_EXTRACTED_FRAMES
+    # Reduce effective fps for long videos so the output is bounded.
+    try:
+        probe=subprocess.run(["ffprobe","-v","error","-show_entries","format=duration","-of","default=noprint_wrappers=1:nokey=1",str(src)],capture_output=True,text=True,timeout=30)
+        duration=float(probe.stdout.strip())
+        if duration>0: interval=min(interval,max_frames/duration)
+    except Exception: pass
     with db() as c:
         c.execute("INSERT INTO tasks(id,status,created_at,source,output_dir,interval,max_frames) VALUES(?,?,?,?,?,?,?)",
                   (task_id,"queued",time.time(),str(src),str(out),interval,max_frames))
